@@ -1,0 +1,59 @@
+"""Supabase REST helpers — insert and fetch expenses.
+
+We use the PostgREST endpoint (https://supabase.com/docs/guides/api) with the
+service role key so the bot can write without RLS getting in the way.
+"""
+
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
+_HEADERS = {
+    "apikey": SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SERVICE_ROLE_KEY}",
+    "Content-Type": "application/json",
+}
+
+
+def insert_expense(date: str, description: str, amount: float,
+                   category: str | None = None, currency: str = "USD") -> dict:
+    row = {
+        "date": date,
+        "description": description,
+        "amount": amount,
+        "category": category,
+        "currency": currency,
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        json=row,
+        headers={**_HEADERS, "Prefer": "return=representation"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()[0]
+
+
+def fetch_expenses(start_date: str | None = None,
+                   end_date: str | None = None) -> list[dict]:
+    params = {"select": "date,description,category,amount,currency",
+              "order": "date.desc"}
+    if start_date:
+        params["date"] = f"gte.{start_date}"
+    if end_date:
+        # PostgREST allows multiple filters on the same column via "and"
+        params["and"] = f"(date.gte.{start_date or '1900-01-01'},date.lte.{end_date})"
+        params.pop("date", None)
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        params=params,
+        headers=_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
