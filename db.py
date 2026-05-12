@@ -21,7 +21,8 @@ _HEADERS = {
 
 
 def insert_expense(date: str, description: str, amount: float,
-                   category: str | None = None, currency: str = "USD") -> dict:
+                   category: str | None = None, currency: str = "USD",
+                   tag: str | None = None) -> dict:
     row = {
         "date": date,
         "description": description,
@@ -29,6 +30,8 @@ def insert_expense(date: str, description: str, amount: float,
         "category": category,
         "currency": currency,
     }
+    if tag:                       # only include if non-empty so NULL is the default
+        row["tag"] = tag
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/expenses",
         json=row,
@@ -41,7 +44,7 @@ def insert_expense(date: str, description: str, amount: float,
 
 def fetch_expenses(start_date: str | None = None,
                    end_date: str | None = None) -> list[dict]:
-    params = {"select": "date,description,category,amount,currency",
+    params = {"select": "date,description,category,amount,currency,tag",
               "order": "date.desc"}
     if start_date:
         params["date"] = f"gte.{start_date}"

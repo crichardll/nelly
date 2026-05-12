@@ -29,6 +29,7 @@ import db
         "amount": float,
         "category": str,     # e.g. "Dining out", "Taxi", "Groceries"
         "currency": str,     # default USD
+        "tag": str,          # empty string means "no tag"
     },
 )
 async def add_expense(args):
@@ -38,10 +39,12 @@ async def add_expense(args):
         amount=float(args["amount"]),
         category=args.get("category"),
         currency=args.get("currency") or "USD",
+        tag=args.get("tag") or None,   # "" → None → NULL in DB
     )
+    tag_suffix = f" #{row['tag']}" if row.get("tag") else ""
     return {"content": [{"type": "text", "text":
         f"Saved: {row['date']} {row['description']} "
-        f"{row['amount']} {row['currency']} ({row['category']})"}]}
+        f"{row['amount']} {row['currency']} ({row['category']}){tag_suffix}"}]}
 
 
 @tool(
@@ -69,6 +72,9 @@ def _system_prompt() -> str:
         "description, a category (Dining out, Taxi, Groceries, Liquor, "
         "Entertainment, Travel, Other), and call add_expense. If no date "
         "is given, use today. Default currency USD. "
+        "Include a tag ONLY if the user explicitly mentions one "
+        "(e.g. 'tag: work', '#trip-tokyo', 'use tag travel'). "
+        "Otherwise pass an empty string for tag. "
         "When the user asks for a summary or total, call list_expenses for "
         "the right date range, then reply with a short markdown breakdown. "
         "Keep replies short, friendly, and in the same language the user wrote."
