@@ -50,7 +50,8 @@ async def add_expense(args):
 @tool(
     "list_expenses",
     "Return all expenses in the given date range (inclusive). "
-    "Use this to answer summary/total/breakdown questions.",
+    "Use this to answer summary/total/breakdown questions, or to look up "
+    "a row's id before calling update_expense.",
     {"start_date": str, "end_date": str},  # both YYYY-MM-DD
 )
 async def list_expenses(args):
@@ -58,9 +59,50 @@ async def list_expenses(args):
     return {"content": [{"type": "text", "text": str(rows)}]}
 
 
+@tool(
+    "update_expense",
+    "Update fields of an existing expense by id. Pass an empty string "
+    "for any field you don't want to change. Always call list_expenses "
+    "first to find the row's id.",
+    {
+        "id": str,            # uuid of the row to update
+        "date": str,          # YYYY-MM-DD or ""
+        "description": str,
+        "amount": str,        # str so "" can mean "no change"; converted below
+        "category": str,
+        "currency": str,
+        "tag": str,
+    },
+)
+async def update_expense(args):
+    updates: dict = {}
+    if args.get("date"):
+        updates["date"] = args["date"]
+    if args.get("description"):
+        updates["description"] = args["description"]
+    if args.get("amount"):
+        updates["amount"] = float(args["amount"])
+    if args.get("category"):
+        updates["category"] = args["category"]
+    if args.get("currency"):
+        updates["currency"] = args["currency"]
+    if args.get("tag"):
+        updates["tag"] = args["tag"]
+
+    if not updates:
+        return {"content": [{"type": "text",
+            "text": "No fields to change — nothing was updated."}]}
+
+    row = db.update_expense(args["id"], updates)
+    tag_suffix = f" #{row['tag']}" if row.get("tag") else ""
+    return {"content": [{"type": "text", "text":
+        f"Updated: {row['date']} {row['description']} "
+        f"{row['amount']} {row['currency']} ({row['category']}){tag_suffix}"}]}
+
+
 _server = create_sdk_mcp_server(
     name="nelly-db", version="1.0.0",
-    tools=[add_expense, list_expenses],
+    tools=[add_expense, list_expenses, update_expense],
 )
 
 
@@ -77,6 +119,12 @@ def _system_prompt() -> str:
         "Otherwise pass an empty string for tag. "
         "When the user asks for a summary or total, call list_expenses for "
         "the right date range, then reply with a short markdown breakdown. "
+        "When the user wants to change an existing expense, first call "
+        "list_expenses to find candidate rows, identify the right one by "
+        "description/date/amount, then call update_expense with that row's "
+        "id and empty strings for fields that shouldn't change. If more than "
+        "one expense plausibly matches, ask the user to clarify before "
+        "updating. "
         "Keep replies short, friendly, and in the same language the user wrote."
     )
 
@@ -86,7 +134,11 @@ async def handle_message(text: str) -> str:
     options = ClaudeAgentOptions(
         system_prompt=_system_prompt(),
         mcp_servers={"db": _server},
-        allowed_tools=["mcp__db__add_expense", "mcp__db__list_expenses"],
+        allowed_tools=[
+            "mcp__db__add_expense",
+            "mcp__db__list_expenses",
+            "mcp__db__update_expense",
+        ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",
     )

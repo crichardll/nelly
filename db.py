@@ -44,7 +44,7 @@ def insert_expense(date: str, description: str, amount: float,
 
 def fetch_expenses(start_date: str | None = None,
                    end_date: str | None = None) -> list[dict]:
-    params = {"select": "date,description,category,amount,currency,tag",
+    params = {"select": "id,date,description,category,amount,currency,tag",
               "order": "date.desc"}
     if start_date:
         params["date"] = f"gte.{start_date}"
@@ -60,3 +60,22 @@ def fetch_expenses(start_date: str | None = None,
     )
     r.raise_for_status()
     return r.json()
+
+
+def update_expense(id: str, updates: dict) -> dict:
+    """PATCH a single expense by id. `updates` is a partial row — only the
+    fields present are changed. Returns the updated row."""
+    if not updates:
+        raise ValueError("update_expense called with no fields to update")
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        params={"id": f"eq.{id}"},
+        json=updates,
+        headers={**_HEADERS, "Prefer": "return=representation"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        raise ValueError(f"no expense found with id={id}")
+    return rows[0]
