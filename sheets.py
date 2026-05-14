@@ -8,6 +8,7 @@ service account email must be shared on the sheet as Editor — `service_account
 returns it so error messages can tell the user whom to share with.
 """
 
+import json
 import os
 import gspread
 from dotenv import load_dotenv
@@ -54,5 +55,7 @@ def sync_to_sheet(rows: list[dict]) -> int:
 
 
 def service_account_email() -> str:
-    """The email to share the sheet with. Surfaced in error messages."""
-    return _client().auth.service_account_email
+    """The email to share the sheet with. Surfaced in error messages.
+    Read straight from the JSON key — no gspread internals."""
+    with open(os.environ["GOOGLE_CREDENTIALS_FILE"]) as f:
+        return json.load(f)["client_email"]
