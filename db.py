@@ -62,6 +62,18 @@ def fetch_expenses(start_date: str | None = None,
     return r.json()
 
 
+def fetch_all_expenses() -> list[dict]:
+    """All rows, all columns, ordered newest-first. Used by the sheet sync."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        params={"select": "*", "order": "date.desc,created_at.desc"},
+        headers=_HEADERS,
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def update_expense(id: str, updates: dict) -> dict:
     """PATCH a single expense by id. `updates` is a partial row — only the
     fields present are changed. Returns the updated row."""

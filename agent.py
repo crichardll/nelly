@@ -1,8 +1,10 @@
 """Nelly — the Claude agent that turns chat messages into DB actions.
 
-The agent exposes two MCP tools backed by db.py:
-  - add_expense:   parses "lunch 25" style messages and writes a row
-  - list_expenses: pulls rows for a date range so Claude can summarize them
+The agent exposes MCP tools backed by db.py and sheets.py:
+  - add_expense:    parses "lunch 25" style messages and writes a row
+  - list_expenses:  pulls rows for a date range so Claude can summarize them
+  - update_expense: PATCHes a row by id
+  - sync_sheet:     overwrites the Google Sheet mirror with all expenses
 
 Each Telegram message is one independent agent turn (no chat memory).
 """
@@ -18,6 +20,7 @@ from claude_agent_sdk import (
 )
 
 import db
+import sheets
 
 
 @tool(
@@ -100,9 +103,34 @@ async def update_expense(args):
         f"{row['amount']} {row['currency']} ({row['category']}){tag_suffix}"}]}
 
 
+@tool(
+    "sync_sheet",
+    "Overwrite the Google Sheet with all current expenses. "
+    "Use when the user asks to sync, export, refresh, or update the spreadsheet.",
+    {},
+)
+async def sync_sheet(args):
+    try:
+        rows = db.fetch_all_expenses()
+        n = sheets.sync_to_sheet(rows)
+        return {"content": [{"type": "text",
+            "text": f"Synced {n} rows to BBDD_Gastos."}]}
+    except Exception as e:
+        msg = f"Sheet sync failed: {type(e).__name__}: {e}"
+        # The most common first-run failure is forgetting to share the sheet
+        # with the service-account email. Surface it explicitly.
+        if "PERMISSION_DENIED" in str(e) or "403" in str(e):
+            try:
+                msg += (f"\nShare the sheet with "
+                        f"{sheets.service_account_email()} as Editor.")
+            except Exception:
+                pass
+        return {"content": [{"type": "text", "text": msg}]}
+
+
 _server = create_sdk_mcp_server(
     name="nelly-db", version="1.0.0",
-    tools=[add_expense, list_expenses, update_expense],
+    tools=[add_expense, list_expenses, update_expense, sync_sheet],
 )
 
 
@@ -125,6 +153,8 @@ def _system_prompt() -> str:
         "id and empty strings for fields that shouldn't change. If more than "
         "one expense plausibly matches, ask the user to clarify before "
         "updating. "
+        "If the user asks to sync, export, refresh, or update the spreadsheet, "
+        "call sync_sheet and report back with the row count. "
         "Keep replies short, friendly, and in the same language the user wrote."
     )
 
@@ -138,6 +168,7 @@ async def handle_message(text: str) -> str:
             "mcp__db__add_expense",
             "mcp__db__list_expenses",
             "mcp__db__update_expense",
+            "mcp__db__sync_sheet",
         ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",
