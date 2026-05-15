@@ -7,6 +7,8 @@ The agent exposes MCP tools backed by db.py / sheets.py / bofa.py:
   - sync_sheet:                   mirror Supabase -> Google Sheet
   - parse_bofa_csv:               clean a Bank of America transactions CSV
   - import_classified_expenses:   bulk-insert with reference-based dedup
+  - check_duplicates:             on-demand fuzzy dedup (same amount, dates ±1d)
+  - delete_expense:               permanently delete a row by id
 
 Each Telegram message is one independent agent turn (no chat memory).
 """
@@ -134,6 +136,37 @@ async def sync_sheet(args):
 
 
 @tool(
+    "check_duplicates",
+    "Scan the expenses table for potential duplicate pairs (same amount, "
+    "dates within 1 day). Use when the user asks to find/check/review "
+    "duplicates. Returns pairs to surface for user review — does NOT delete.",
+    {},
+)
+async def check_duplicates(args):
+    pairs = db.find_potential_duplicates(window_days=1)
+    if not pairs:
+        return {"content": [{"type": "text", "text": "No potential duplicates."}]}
+    return {"content": [{"type": "text",
+        "text": f"Found {len(pairs)} potential duplicate pair(s):\n"
+                f"{json.dumps(pairs, indent=2)}"}]}
+
+
+@tool(
+    "delete_expense",
+    "Permanently delete an expense by id. Use only when the user explicitly "
+    "confirms which row to remove — typically after check_duplicates "
+    "surfaced a pair and the user picked one to drop. Irreversible.",
+    {"id": str},
+)
+async def delete_expense(args):
+    row = db.delete_expense(args["id"])
+    tag_suffix = f" #{row['tag']}" if row.get("tag") else ""
+    return {"content": [{"type": "text",
+        "text": f"Deleted: {row['date']} {row['description']} "
+                f"{row['amount']} {row['currency']} ({row['category']}){tag_suffix}"}]}
+
+
+@tool(
     "parse_bofa_csv",
     "Parse a Bank of America transactions CSV. Returns the rows ready to "
     "classify and insert. Pending rows and credit-card payments are already "
@@ -172,6 +205,7 @@ _server = create_sdk_mcp_server(
     tools=[
         add_expense, list_expenses, update_expense, sync_sheet,
         parse_bofa_csv, import_classified_expenses,
+        check_duplicates, delete_expense,
     ],
 )
 
@@ -200,6 +234,13 @@ def _system_prompt() -> str:
         "updating. "
         "If the user asks to sync, export, refresh, or update the spreadsheet, "
         "call sync_sheet and report back with the row count. "
+        "When the user asks to check, find, or review duplicates, call "
+        "check_duplicates. Present each returned pair as a numbered item "
+        "showing both rows side-by-side with their dates, descriptions, "
+        "amounts, categories, and ids. Ask the user which one to delete "
+        "(or whether to leave both). When they confirm, call delete_expense "
+        "with the chosen id. NEVER call delete_expense without an explicit "
+        "user instruction — deletion is irreversible. "
         "When the user uploads a Bank of America CSV (you'll see a header "
         "line 'Posted Date,Reference Number,Payee,Address,Amount'), call "
         "parse_bofa_csv with the full CSV text. For each returned row, pick "
@@ -225,6 +266,8 @@ async def handle_message(text: str) -> str:
             "mcp__db__sync_sheet",
             "mcp__db__parse_bofa_csv",
             "mcp__db__import_classified_expenses",
+            "mcp__db__check_duplicates",
+            "mcp__db__delete_expense",
         ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",

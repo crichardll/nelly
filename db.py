@@ -5,6 +5,8 @@ service role key so the bot can write without RLS getting in the way.
 """
 
 import os
+from datetime import date as _date
+
 import requests
 from dotenv import load_dotenv
 
@@ -93,6 +95,44 @@ def fetch_all_expenses() -> list[dict]:
     )
     r.raise_for_status()
     return r.json()
+
+
+def find_potential_duplicates(window_days: int = 1) -> list[dict]:
+    """Pairs of expenses with identical amount and dates within window_days.
+    Each pair is {'a': row_a, 'b': row_b} with row_a being the older entry.
+    Pairs are sorted with the most-recent pair first."""
+    rows = fetch_all_expenses()
+    by_amount: dict[float, list[dict]] = {}
+    for r in rows:
+        by_amount.setdefault(float(r["amount"]), []).append(r)
+    pairs: list[dict] = []
+    for items in by_amount.values():
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda r: r["date"])
+        for i in range(len(items)):
+            di = _date.fromisoformat(items[i]["date"])
+            for j in range(i + 1, len(items)):
+                dj = _date.fromisoformat(items[j]["date"])
+                if abs((dj - di).days) <= window_days:
+                    pairs.append({"a": items[i], "b": items[j]})
+    pairs.sort(key=lambda p: p["b"]["date"], reverse=True)
+    return pairs
+
+
+def delete_expense(id: str) -> dict:
+    """Permanently delete a row by id. Returns the deleted row."""
+    r = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        params={"id": f"eq.{id}"},
+        headers={**_HEADERS, "Prefer": "return=representation"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        raise ValueError(f"no expense found with id={id}")
+    return rows[0]
 
 
 def update_expense(id: str, updates: dict) -> dict:
