@@ -62,6 +62,27 @@ def fetch_expenses(start_date: str | None = None,
     return r.json()
 
 
+def insert_expenses_bulk(rows: list[dict]) -> dict:
+    """POST many rows at once. Duplicates by `bank_reference` are skipped via
+    the partial unique index — PostgREST returns only the inserted rows when
+    `resolution=ignore-duplicates`. Returns {'inserted': N, 'duplicates': M}."""
+    if not rows:
+        return {"inserted": 0, "duplicates": 0}
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/expenses",
+        params={"on_conflict": "bank_reference"},
+        json=rows,
+        headers={
+            **_HEADERS,
+            "Prefer": "return=representation,resolution=ignore-duplicates",
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    inserted = len(r.json())
+    return {"inserted": inserted, "duplicates": len(rows) - inserted}
+
+
 def fetch_all_expenses() -> list[dict]:
     """All rows, all columns, ordered newest-first. Used by the sheet sync."""
     r = requests.get(

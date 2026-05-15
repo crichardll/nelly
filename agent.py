@@ -1,14 +1,17 @@
 """Nelly — the Claude agent that turns chat messages into DB actions.
 
-The agent exposes MCP tools backed by db.py and sheets.py:
-  - add_expense:    parses "lunch 25" style messages and writes a row
-  - list_expenses:  pulls rows for a date range so Claude can summarize them
-  - update_expense: PATCHes a row by id
-  - sync_sheet:     overwrites the Google Sheet mirror with all expenses
+The agent exposes MCP tools backed by db.py / sheets.py / bofa.py:
+  - add_expense:                  one-off insert from a chat message
+  - list_expenses:                rows in a date range for summaries / edits
+  - update_expense:               PATCH a row by id
+  - sync_sheet:                   mirror Supabase -> Google Sheet
+  - parse_bofa_csv:               clean a Bank of America transactions CSV
+  - import_classified_expenses:   bulk-insert with reference-based dedup
 
 Each Telegram message is one independent agent turn (no chat memory).
 """
 
+import json
 import os
 from datetime import date as _date
 
@@ -19,6 +22,7 @@ from claude_agent_sdk import (
     tool,
 )
 
+import bofa
 import categories
 import db
 import sheets
@@ -129,9 +133,46 @@ async def sync_sheet(args):
         return {"content": [{"type": "text", "text": msg}]}
 
 
+@tool(
+    "parse_bofa_csv",
+    "Parse a Bank of America transactions CSV. Returns the rows ready to "
+    "classify and insert. Pending rows and credit-card payments are already "
+    "filtered out. The amount field is positive for charges and negative for "
+    "refunds — preserve that sign when you insert.",
+    {"csv_text": str},
+)
+async def parse_bofa_csv(args):
+    rows = bofa.parse(args["csv_text"])
+    return {"content": [{"type": "text",
+        "text": f"{len(rows)} rows after filtering:\n{json.dumps(rows, indent=2)}"}]}
+
+
+@tool(
+    "import_classified_expenses",
+    "Bulk-insert pre-classified expenses. Provide a JSON array of objects "
+    "with keys: bank_reference, date (YYYY-MM-DD), description (short and "
+    "clean — strip store numbers / city codes / bank prefixes like TST*), "
+    "category (must be a leaf from the vocabulary), amount (number; "
+    "negative for refunds), currency (default USD). Duplicates by "
+    "bank_reference are silently skipped — safe to re-run.",
+    {"expenses_json": str},
+)
+async def import_classified_expenses(args):
+    rows = json.loads(args["expenses_json"])
+    for r in rows:
+        r.setdefault("currency", "USD")
+    result = db.insert_expenses_bulk(rows)
+    return {"content": [{"type": "text",
+        "text": f"Imported {result['inserted']} new expense(s); "
+                f"skipped {result['duplicates']} duplicate(s)."}]}
+
+
 _server = create_sdk_mcp_server(
     name="nelly-db", version="1.0.0",
-    tools=[add_expense, list_expenses, update_expense, sync_sheet],
+    tools=[
+        add_expense, list_expenses, update_expense, sync_sheet,
+        parse_bofa_csv, import_classified_expenses,
+    ],
 )
 
 
@@ -159,6 +200,15 @@ def _system_prompt() -> str:
         "updating. "
         "If the user asks to sync, export, refresh, or update the spreadsheet, "
         "call sync_sheet and report back with the row count. "
+        "When the user uploads a Bank of America CSV (you'll see a header "
+        "line 'Posted Date,Reference Number,Payee,Address,Amount'), call "
+        "parse_bofa_csv with the full CSV text. For each returned row, pick "
+        "a leaf category from the vocabulary above and write a short clean "
+        "description (strip store numbers, city/state suffixes, and bank "
+        "prefixes like TST*, SQ*, PY*). Then call import_classified_expenses "
+        "ONCE with the JSON array of all classified rows. Preserve the "
+        "amount sign — negative means a refund. Report the inserted and "
+        "duplicate counts. "
         "Keep replies short, friendly, and in the same language the user wrote."
     )
 
@@ -173,6 +223,8 @@ async def handle_message(text: str) -> str:
             "mcp__db__list_expenses",
             "mcp__db__update_expense",
             "mcp__db__sync_sheet",
+            "mcp__db__parse_bofa_csv",
+            "mcp__db__import_classified_expenses",
         ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",
