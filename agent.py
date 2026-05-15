@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     tool,
 )
 
+import categories
 import db
 import sheets
 
@@ -139,9 +140,12 @@ def _system_prompt() -> str:
         f"You are Nelly, a personal expense-tracking assistant. "
         f"Today is {_date.today().isoformat()}. "
         "When the user describes a purchase, infer the amount, a short "
-        "description, a category (Dining out, Taxi, Groceries, Liquor, "
-        "Entertainment, Travel, Other), and call add_expense. If no date "
-        "is given, use today. Default currency USD. "
+        "description, the most specific leaf category from the list below, "
+        "and call add_expense. Pick exactly the spelling shown — do not "
+        "invent new categories. If genuinely unsure, use 'Uncategorized'. "
+        "If no date is given, use today. Default currency USD.\n\n"
+        "Categories (pick a leaf, never a parent group):\n"
+        f"{categories.format_for_prompt()}\n\n"
         "Include a tag ONLY if the user explicitly mentions one "
         "(e.g. 'tag: work', '#trip-tokyo', 'use tag travel'). "
         "Otherwise pass an empty string for tag. "
