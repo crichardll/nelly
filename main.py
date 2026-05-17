@@ -1,8 +1,9 @@
 """Telegram entrypoint — polls for messages and hands them to the agent.
 
-Only the whitelisted user (TELEGRAM_ALLOWED_USER_ID in .env) is allowed.
-If the env var is empty, the bot replies with the sender's user ID so you
-can paste it into .env and restart.
+Only whitelisted users are allowed. TELEGRAM_ALLOWED_USER_ID in .env holds a
+comma-separated list of Telegram user IDs (a single ID also works). If the env
+var is empty, the bot replies with the sender's user ID so you can paste it
+into .env and restart.
 """
 
 import logging
@@ -28,12 +29,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("nelly")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ALLOWED_ID = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "").strip()
+ALLOWED_IDS = {
+    uid.strip()
+    for uid in os.environ.get("TELEGRAM_ALLOWED_USER_ID", "").split(",")
+    if uid.strip()
+}
 
 
 def _authorized(update: Update) -> tuple[bool, str]:
     """Returns (is_authorized, user_id_str). Replies are caller's job."""
-    return str(update.effective_user.id) == ALLOWED_ID, str(update.effective_user.id)
+    uid = str(update.effective_user.id)
+    return uid in ALLOWED_IDS, uid
 
 
 async def on_message(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -41,7 +47,7 @@ async def on_message(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     log.info("msg from %s: %s", user_id, text)
 
-    if not ALLOWED_ID:
+    if not ALLOWED_IDS:
         await update.message.reply_text(
             f"Bot not yet configured. Your Telegram user ID is `{user_id}` — "
             "add it as TELEGRAM_ALLOWED_USER_ID in .env and restart.",
@@ -49,8 +55,11 @@ async def on_message(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    if user_id != ALLOWED_ID:
-        await update.message.reply_text("Not authorized.")
+    if user_id not in ALLOWED_IDS:
+        await update.message.reply_text(
+            f"Not authorized. Your Telegram user ID is `{user_id}`.",
+            parse_mode="Markdown",
+        )
         return
 
     try:
@@ -93,8 +102,11 @@ async def on_photo(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram-compressed photos (sent inline, not as a file)."""
     ok, user_id = _authorized(update)
     log.info("photo from %s", user_id)
-    if not ALLOWED_ID or not ok:
-        await update.message.reply_text("Not authorized.")
+    if not ALLOWED_IDS or not ok:
+        await update.message.reply_text(
+            f"Not authorized. Your Telegram user ID is `{user_id}`.",
+            parse_mode="Markdown",
+        )
         return
     # photo is a list of sizes, smallest → largest; take the largest.
     f = await update.message.photo[-1].get_file()
@@ -108,8 +120,11 @@ async def on_document(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     doc = update.message.document
     log.info("doc from %s: %s (%s bytes)", user_id, doc.file_name, doc.file_size)
 
-    if not ALLOWED_ID or not ok:
-        await update.message.reply_text("Not authorized.")
+    if not ALLOWED_IDS or not ok:
+        await update.message.reply_text(
+            f"Not authorized. Your Telegram user ID is `{user_id}`.",
+            parse_mode="Markdown",
+        )
         return
 
     name = (doc.file_name or "").lower()
