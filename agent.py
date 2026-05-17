@@ -14,12 +14,15 @@ The agent exposes MCP tools backed by db.py / sheets.py / bofa.py:
   - save_menu:                    save/revise weekly menu entries
   - get_menu:                     planned menu for a date range
 
-Each Telegram message is one independent agent turn (no chat memory).
+Short-term memory: messages within a ~45 min window share one Claude Agent
+SDK session (resumed by id); after that idle gap a fresh session starts.
 """
 
 import json
 import os
-from datetime import date as _date
+import uuid
+from datetime import date as _date, datetime, timedelta, timezone
+from pathlib import Path
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -357,11 +360,50 @@ def _system_prompt() -> str:
     )
 
 
-async def handle_message(text: str, image_path: str | None = None) -> str:
-    """Run one agent turn on a single user message. Returns the final reply.
-    If image_path is given (e.g. a fridge photo), the agent is told to open
-    it with the Read tool."""
-    options = ClaudeAgentOptions(
+# --- Short-term conversation memory ----------------------------------------
+# Messages within _SESSION_IDLE share one SDK session (resumed by id); after a
+# longer silence a fresh session starts. The SDK persists the full transcript
+# itself; we only persist the pointer (id + last activity) so it survives a
+# systemctl restart. Single user + sequential polling → no locking needed.
+
+_SESSION_IDLE = timedelta(minutes=45)
+_SESSION_FILE = Path.home() / ".nelly" / "session.json"
+
+
+def _load_session() -> tuple[str | None, datetime | None]:
+    try:
+        data = json.loads(_SESSION_FILE.read_text())
+        when = datetime.fromisoformat(data["last_active_at"])
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return data["session_id"], when
+    except (OSError, ValueError, KeyError):
+        return None, None
+
+
+def _save_session(session_id: str, when: datetime) -> None:
+    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _SESSION_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(
+        {"session_id": session_id, "last_active_at": when.isoformat()}))
+    tmp.replace(_SESSION_FILE)
+
+
+def _pick_session() -> tuple[str, bool]:
+    """Returns (session_id, is_fresh). Fresh when there's no prior session or
+    the idle gap since last activity has been exceeded."""
+    sid, last = _load_session()
+    now = datetime.now(timezone.utc)
+    if sid is None or last is None or (now - last) > _SESSION_IDLE:
+        return str(uuid.uuid4()), True
+    return sid, False
+
+
+def _options(fresh: bool, sid: str) -> ClaudeAgentOptions:
+    # session_id pins a new conversation; resume continues an existing one.
+    # The SDK forbids combining them (without fork_session), so pass one.
+    cont = {"session_id": sid} if fresh else {"resume": sid}
+    return ClaudeAgentOptions(
         system_prompt=_system_prompt(),
         mcp_servers={"db": _server},
         allowed_tools=[
@@ -381,14 +423,12 @@ async def handle_message(text: str, image_path: str | None = None) -> str:
         ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        **cont,
     )
 
-    if image_path:
-        text = (
-            f"{text}\n\n[A fridge/pantry photo is saved at {image_path} — "
-            f"use the Read tool on that exact path to view it.]"
-        )
 
+async def _run_turn(options: ClaudeAgentOptions, text: str) -> str:
     reply_parts: list[str] = []
     async with ClaudeSDKClient(options=options) as client:
         await client.query(text)
@@ -398,3 +438,30 @@ async def handle_message(text: str, image_path: str | None = None) -> str:
                 if getattr(block, "text", None):
                     reply_parts.append(block.text)
     return "\n".join(reply_parts).strip() or "(no reply)"
+
+
+async def handle_message(text: str, image_path: str | None = None) -> str:
+    """Run one agent turn. Turns within ~45 min share an SDK session so
+    follow-ups have context; after that idle gap a fresh session starts.
+    If image_path is given (e.g. a fridge photo), the agent is told to open
+    it with the Read tool."""
+    if image_path:
+        text = (
+            f"{text}\n\n[A fridge/pantry photo is saved at {image_path} — "
+            f"use the Read tool on that exact path to view it.]"
+        )
+
+    sid, fresh = _pick_session()
+    try:
+        reply = await _run_turn(_options(fresh, sid), text)
+    except Exception:
+        # A resumed turn failed (e.g. the transcript is gone after an EC2
+        # rebuild). Deliberately do NOT auto-retry this turn: tools may have
+        # already run and re-running could double-write. Drop the pointer so
+        # the NEXT message starts a clean session, and surface the error.
+        if not fresh:
+            _SESSION_FILE.unlink(missing_ok=True)
+        raise
+
+    _save_session(sid, datetime.now(timezone.utc))
+    return reply
