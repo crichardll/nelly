@@ -40,7 +40,7 @@ Under the hood she's a Claude agent (via the [Claude Agent SDK](https://docs.ant
 4. Those tools live in **`db.py`**, which speaks to Supabase over its REST API.
 5. Claude writes a short reply. `main.py` sends it back to Telegram.
 
-Each message is one independent agent turn — no chat memory. Keeps the code dead simple. If you ever want multi-turn ("yes, save it", "no, change category to taxi"), reuse the `ClaudeSDKClient` across messages.
+**Conversation memory (short-term).** Messages within ~45 min share one Claude Agent SDK session, so follow-ups have context ("yes, save it", "no, make it taxi", "and last week?"). After ~45 min of silence a fresh conversation auto-starts — that's the only reset; there's no command. The SDK persists the full transcript itself (under `~/.claude/...` on the box); Nelly only keeps a tiny pointer (session id + last-active time) in `~/.nelly/session.json` so memory survives a `systemctl restart`. It's lost only if the EC2 box is rebuilt from scratch — acceptable for short-term recall. Tuning: `_SESSION_IDLE` in `agent.py`.
 
 ---
 
