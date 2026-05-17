@@ -22,6 +22,9 @@ import agent
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
+# httpx logs every request URL at INFO — for Telegram that URL embeds the bot
+# token (.../bot<TOKEN>/getUpdates), leaking it into the systemd journal.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("nelly")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
