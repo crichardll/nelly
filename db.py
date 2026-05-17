@@ -152,3 +152,110 @@ def update_expense(id: str, updates: dict) -> dict:
     if not rows:
         raise ValueError(f"no expense found with id={id}")
     return rows[0]
+
+
+# --- Pantry stock (despensa_stock) -----------------------------------------
+
+def replace_stock_snapshot(captured_on: str, items: list[dict]) -> dict:
+    """Replace the pantry inventory for a date: delete that date's rows, then
+    insert the new ones. Idempotent — re-sending a photo the same day just
+    overwrites. `items` is a list of {item, quantity, category}. Returns
+    {'date': captured_on, 'count': N}."""
+    requests.delete(
+        f"{SUPABASE_URL}/rest/v1/despensa_stock",
+        params={"captured_on": f"eq.{captured_on}"},
+        headers=_HEADERS,
+        timeout=15,
+    ).raise_for_status()
+    if not items:
+        return {"date": captured_on, "count": 0}
+    rows = [
+        {
+            "captured_on": captured_on,
+            "item": it["item"],
+            "quantity": it.get("quantity") or None,
+            "category": it.get("category") or None,
+        }
+        for it in items
+    ]
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/despensa_stock",
+        json=rows,
+        headers={**_HEADERS, "Prefer": "return=representation"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return {"date": captured_on, "count": len(r.json())}
+
+
+def fetch_latest_stock() -> list[dict]:
+    """The most recent pantry snapshot (= current stock). Empty list if the
+    table has no rows yet."""
+    head = requests.get(
+        f"{SUPABASE_URL}/rest/v1/despensa_stock",
+        params={"select": "captured_on", "order": "captured_on.desc", "limit": 1},
+        headers=_HEADERS,
+        timeout=15,
+    )
+    head.raise_for_status()
+    latest = head.json()
+    if not latest:
+        return []
+    day = latest[0]["captured_on"]
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/despensa_stock",
+        params={"select": "id,captured_on,item,quantity,category",
+                "captured_on": f"eq.{day}",
+                "order": "category.asc,item.asc"},
+        headers=_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+# --- Weekly menu (weekly_menu) ---------------------------------------------
+
+def upsert_menu(rows: list[dict]) -> dict:
+    """Insert/replace menu entries keyed by (menu_date, meal, eater). Each row
+    is {menu_date, meal, dish, notes, eater}. `eater` is 'adulto' (default) or
+    'bebé' — the same slot can hold one of each. Returns {'count': N}."""
+    if not rows:
+        return {"count": 0}
+    payload = [
+        {
+            "menu_date": r["menu_date"],
+            "meal": r["meal"],
+            "dish": r["dish"],
+            "notes": r.get("notes") or None,
+            "eater": r.get("eater") or "adulto",
+        }
+        for r in rows
+    ]
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/weekly_menu",
+        params={"on_conflict": "menu_date,meal,eater"},
+        json=payload,
+        headers={
+            **_HEADERS,
+            "Prefer": "return=representation,resolution=merge-duplicates",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return {"count": len(resp.json())}
+
+
+def fetch_menu(start_date: str, end_date: str) -> list[dict]:
+    """Menu entries with menu_date in [start_date, end_date], ordered by
+    date, eater, then meal."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/weekly_menu",
+        params={"select": "id,menu_date,meal,dish,notes,eater",
+                "and": f"(menu_date.gte.{start_date},menu_date.lte.{end_date})",
+                "order": "menu_date.asc,eater.asc,meal.asc"},
+        headers=_HEADERS,
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()

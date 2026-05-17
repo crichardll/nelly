@@ -9,6 +9,10 @@ The agent exposes MCP tools backed by db.py / sheets.py / bofa.py:
   - import_classified_expenses:   bulk-insert with reference-based dedup
   - check_duplicates:             on-demand fuzzy dedup (same amount, dates ±1d)
   - delete_expense:               permanently delete a row by id
+  - save_stock_snapshot:          record pantry inventory for a date (from a photo)
+  - list_stock:                   the latest pantry snapshot (current stock)
+  - save_menu:                    save/revise weekly menu entries
+  - get_menu:                     planned menu for a date range
 
 Each Telegram message is one independent agent turn (no chat memory).
 """
@@ -200,12 +204,76 @@ async def import_classified_expenses(args):
                 f"skipped {result['duplicates']} duplicate(s)."}]}
 
 
+@tool(
+    "save_stock_snapshot",
+    "Save the pantry/fridge inventory for a date. Replaces any existing rows "
+    "for that date (idempotent — safe to re-run after re-reading a photo). "
+    "Use after viewing a fridge photo and enumerating what's inside.",
+    {
+        "captured_on": str,   # YYYY-MM-DD
+        "items_json": str,    # JSON array of {item, quantity, category}
+    },
+)
+async def save_stock_snapshot(args):
+    items = json.loads(args["items_json"])
+    result = db.replace_stock_snapshot(args["captured_on"], items)
+    return {"content": [{"type": "text",
+        "text": f"Saved {result['count']} pantry item(s) for {result['date']}."}]}
+
+
+@tool(
+    "list_stock",
+    "Return the most recent pantry inventory snapshot (the current stock at "
+    "home). Use before building a grocery list or when the user asks what "
+    "we have.",
+    {},
+)
+async def list_stock(args):
+    rows = db.fetch_latest_stock()
+    if not rows:
+        return {"content": [{"type": "text",
+            "text": "No pantry snapshot yet — send a fridge photo first."}]}
+    return {"content": [{"type": "text",
+        "text": f"Latest snapshot ({rows[0]['captured_on']}):\n"
+                f"{json.dumps(rows, indent=2, ensure_ascii=False)}"}]}
+
+
+@tool(
+    "save_menu",
+    "Save (or revise) weekly menu entries. Provide a JSON array of objects "
+    "with keys: menu_date (YYYY-MM-DD), meal (one of 'desayuno', 'almuerzo', "
+    "'cena'), dish (Spanish), notes (optional), eater ('adulto' or 'bebé', "
+    "default 'adulto'). Entries are keyed by (menu_date, meal, eater) — "
+    "re-saving a slot overwrites it, no duplicates. The same date+meal can "
+    "hold one 'adulto' and one 'bebé' dish.",
+    {"menu_json": str},
+)
+async def save_menu(args):
+    rows = json.loads(args["menu_json"])
+    result = db.upsert_menu(rows)
+    return {"content": [{"type": "text",
+        "text": f"Saved {result['count']} menu entr(y/ies)."}]}
+
+
+@tool(
+    "get_menu",
+    "Return the planned menu for a date range (inclusive). Use to recall a "
+    "week's menu or to build the grocery list.",
+    {"start_date": str, "end_date": str},  # both YYYY-MM-DD
+)
+async def get_menu(args):
+    rows = db.fetch_menu(args["start_date"], args["end_date"])
+    return {"content": [{"type": "text",
+        "text": json.dumps(rows, indent=2, ensure_ascii=False)}]}
+
+
 _server = create_sdk_mcp_server(
     name="nelly-db", version="1.0.0",
     tools=[
         add_expense, list_expenses, update_expense, sync_sheet,
         parse_bofa_csv, import_classified_expenses,
         check_duplicates, delete_expense,
+        save_stock_snapshot, list_stock, save_menu, get_menu,
     ],
 )
 
@@ -249,13 +317,50 @@ def _system_prompt() -> str:
         "prefixes like TST*, SQ*, PY*). Then call import_classified_expenses "
         "ONCE with the JSON array of all classified rows. Preserve the "
         "amount sign — negative means a refund. Report the inserted and "
-        "duplicate counts. "
+        "duplicate counts.\n\n"
+        "--- Groceries & meal planning ---\n"
+        "Store pantry items and dishes in SPANISH (e.g. 'huevos', 'leche', "
+        "'pasta con tomate'), regardless of the language the user writes in. "
+        "Meal keys are exactly: 'desayuno', 'almuerzo', 'cena'. Pantry "
+        "categories (pick one, Spanish): Verduras, Frutas, Lácteos, Carnes, "
+        "Pescados, Granos y pastas, Panadería, Congelados, Bebidas, "
+        "Condimentos, Hogar (artículos de hogar no comestibles: papel "
+        "higiénico, toallas de papel, servilletas, limpieza), Otros.\n"
+        "FRIDGE PHOTO: when the message says a fridge/pantry photo was saved "
+        "at a path, use the Read tool on that exact path to view the image, "
+        "enumerate every visible food item with a rough quantity in Spanish "
+        "(e.g. '6', '1 cartón', 'medio paquete', 'poco'), assign a pantry "
+        "category, then call save_stock_snapshot with captured_on = today "
+        "(or the date the user states) and the items JSON. Briefly list back "
+        "what you recorded.\n"
+        "MENU: there is a baby in the household (born around September 2025 — "
+        "about 8 months old as of May 2026; estimate the current age from "
+        "today's date). When you plan a weekly menu, plan TWO tracks per day: "
+        "the adult menu (eater='adulto') and a separate age-appropriate baby "
+        "menu (eater='bebé'). For the baby, follow safe infant feeding for "
+        "their current age — soft/mashed or finely chopped textures, no added "
+        "salt or sugar, no honey, no whole nuts, no choking-hazard shapes, "
+        "and prefer simple single/few-ingredient dishes derived from the same "
+        "fresh stock where sensible. Propose desayuno, almuerzo and cena for "
+        "each day for both eaters, taking current stock into account if "
+        "available (call list_stock). After the user confirms (or if they ask "
+        "you to just save it), call save_menu with one entry per "
+        "(menu_date, meal, eater). To recall a week's menu, call get_menu for "
+        "that date range and show it as a day-by-day table split into "
+        "Adulto and Bebé.\n"
+        "GROCERY LIST: when the user asks what to buy / for the shopping "
+        "list, call list_stock AND get_menu for the target week, then reply "
+        "with the ingredients BOTH the adult and baby menus need that are NOT "
+        "already in stock (or are low), grouped by pantry category. Do NOT "
+        "save the grocery list anywhere — it's chat-only.\n\n"
         "Keep replies short, friendly, and in the same language the user wrote."
     )
 
 
-async def handle_message(text: str) -> str:
-    """Run one agent turn on a single user message. Returns the final reply."""
+async def handle_message(text: str, image_path: str | None = None) -> str:
+    """Run one agent turn on a single user message. Returns the final reply.
+    If image_path is given (e.g. a fridge photo), the agent is told to open
+    it with the Read tool."""
     options = ClaudeAgentOptions(
         system_prompt=_system_prompt(),
         mcp_servers={"db": _server},
@@ -268,10 +373,21 @@ async def handle_message(text: str) -> str:
             "mcp__db__import_classified_expenses",
             "mcp__db__check_duplicates",
             "mcp__db__delete_expense",
+            "mcp__db__save_stock_snapshot",
+            "mcp__db__list_stock",
+            "mcp__db__save_menu",
+            "mcp__db__get_menu",
+            "Read",
         ],
         permission_mode="bypassPermissions",
         model="claude-sonnet-4-6",
     )
+
+    if image_path:
+        text = (
+            f"{text}\n\n[A fridge/pantry photo is saved at {image_path} — "
+            f"use the Read tool on that exact path to view it.]"
+        )
 
     reply_parts: list[str] = []
     async with ClaudeSDKClient(options=options) as client:

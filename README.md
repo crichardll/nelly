@@ -95,6 +95,84 @@ Single table `expenses`:
 
 To extend toward real Splitwise (multiple participants per expense), add an `expense_splits` table referencing `expenses.id`. Not needed yet.
 
+### `despensa_stock` — pantry inventory snapshots
+
+Each fridge photo Nelly reads becomes a dated snapshot. "Current stock" = the rows
+with the most recent `captured_on`; re-sending a photo the same day replaces that
+day's rows. Item names are stored in Spanish.
+
+| column | type | notes |
+|--------|------|-------|
+| `id` | uuid | auto |
+| `captured_on` | date | the day of the photo / assessment |
+| `item` | text | Spanish, e.g. `huevos`, `leche` |
+| `quantity` | text | free text: `6`, `1 cartón`, `medio paquete`, `poco` |
+| `category` | text | Spanish pantry category, optional |
+| `created_at` | timestamptz | auto |
+
+### `weekly_menu` — the planned menu
+
+One row per `(menu_date, meal, eater)` — `meal` is `desayuno`, `almuerzo`, or
+`cena`; `eater` is `adulto` or `bebé` (there's an infant in the household who
+eats different, age-appropriate food). The `unique (menu_date, meal, eater)`
+constraint means re-planning a slot upserts in place, and the same date+meal
+can hold one adult and one baby dish. Dishes are stored in Spanish. The grocery
+list is **not** stored — Nelly builds it on demand from `weekly_menu` (both
+eaters) minus the latest `despensa_stock`.
+
+| column | type | notes |
+|--------|------|-------|
+| `id` | uuid | auto |
+| `menu_date` | date | the day this dish is for |
+| `meal` | text | `desayuno` / `almuerzo` / `cena` |
+| `eater` | text | `adulto` (default) or `bebé` |
+| `dish` | text | Spanish, e.g. `pasta con tomate` |
+| `notes` | text | optional |
+| `created_at` | timestamptz | auto |
+
+Schema (already created in Supabase):
+
+```sql
+create table despensa_stock (
+  id          uuid primary key default gen_random_uuid(),
+  captured_on date not null,
+  item        text not null,
+  quantity    text,
+  category    text,
+  created_at  timestamptz default now()
+);
+create index despensa_stock_captured_on_idx on despensa_stock (captured_on desc);
+
+create table weekly_menu (
+  id         uuid primary key default gen_random_uuid(),
+  menu_date  date not null,
+  meal       text not null,
+  eater      text not null default 'adulto',  -- 'adulto' | 'bebé'
+  dish       text not null,
+  notes      text,
+  created_at timestamptz default now(),
+  unique (menu_date, meal, eater)
+);
+create index weekly_menu_menu_date_idx on weekly_menu (menu_date);
+```
+
+If `weekly_menu` was created before the `eater` column existed, migrate with:
+
+```sql
+alter table weekly_menu add column if not exists eater text not null default 'adulto';
+
+do $$
+declare c text;
+begin
+  select conname into c from pg_constraint
+   where conrelid = 'weekly_menu'::regclass and contype = 'u';
+  if c is not null then execute format('alter table weekly_menu drop constraint %I', c); end if;
+end $$;
+
+alter table weekly_menu add constraint weekly_menu_menu_date_meal_eater_key
+  unique (menu_date, meal, eater);
+```
+
 ---
 
 ## Where it runs
