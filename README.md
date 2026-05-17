@@ -228,7 +228,7 @@ cp .env.example .env  # fill in the values
 | `SUPABASE_SERVICE_ROLE_KEY` | DB write key — never expose |
 | `ANTHROPIC_API_KEY` | For the Claude agent |
 | `TELEGRAM_BOT_TOKEN` | From [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_ALLOWED_USER_ID` | Only this Telegram user can use the bot |
+| `TELEGRAM_ALLOWED_USER_ID` | Comma-separated Telegram user IDs allowed to use the bot (e.g. `111,222`) |
 | `GOOGLE_SHEET_ID` | ID of the sheet to mirror into |
 | `GOOGLE_SHEET_TAB` | Tab name (default `BBDD_Gastos`) |
 | `GOOGLE_CREDENTIALS_FILE` | Path to the service-account JSON key |
